@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
+<title>Live2D View</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: transparent; }
+  #live2d-canvas { width: 100%; height: 100%; display: block; }
+  #status-label {
+    position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%);
+    padding: 4px 14px; border-radius: 12px;
+    background: rgba(108, 99, 255, 0.2); color: #6C63FF;
+    font-size: 12px; font-family: sans-serif; white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+<div id="live2d-canvas"></div>
+<div id="status-label">待机</div>
+
+<!-- Cubism Web SDK 核心（从 CDN 加载） -->
+<script src="https://cdn.jsdelivr.net/npm/pixi.js@7.3.3/dist/pixi.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.5.1/dist/index.min.js"></script>
+
+<script>
+'use strict';
+
+// ================= 配置 =================
+const MODEL_URL = 'https://cubism.live2d.com/sample-app/Hiyori/model.model3.json';
+
+// ================= PIXI + Live2D 初始化 =================
+let app, model;
+
+async function initLive2D() {
+  // 创建 PIXI 应用
+  app = new PIXI.Application({
+    width: window.innerWidth,
+    height: window.innerHeight,
+    transparent: true,
+    antialias: true,
+    backgroundAlpha: 0,
+    resizeTo: document.getElementById('live2d-canvas'),
+  });
+  document.getElementById('live2d-canvas').appendChild(app.view);
+
+  // 加载模型
+  try {
+    model = await PIXI.live2d.Live2DModel.from(MODEL_URL);
+    // 居中并缩放
+    model.anchor.set(0.5, 0.5);
+    model.position.set(app.screen.width / 2, app.screen.height * 0.6);
+    const scale = Math.min(app.screen.width / model.width, app.screen.height / model.height) * 0.9;
+    model.scale.set(scale);
+    app.stage.addChild(model);
+
+    // 启动自动呼吸/眨眼
+    model.internalModel.motionManager.stopAllMotions();
+    model.internalModel.autoBlink = true;
+
+    console.log('[Live2D] 模型加载成功');
+    onModelReady();
+  } catch (e) {
+    console.error('[Live2D] 模型加载失败:', e);
+  }
+}
+
+function onModelReady() {
+  // 通知 Flutter 模型已就绪
+  if (window.flutter_inappwebview) {
+    window.flutter_inappwebview.callHandler('onLive2dReady');
+  }
+  // 兼容 webview_flutter
+  if (typeof Live2dBridge !== 'undefined' && Live2dBridge.onReady) {
+    Live2dBridge.onReady();
+  }
+}
+
+// ================= 窗口尺寸变化 =================
+window.addEventListener('resize', () => {
+  if (!app || !model) return;
+  model.position.set(app.screen.width / 2, app.screen.height * 0.6);
+  const scale = Math.min(app.screen.width / model.width, app.screen.height / model.height) * 0.9;
+  model.scale.set(scale);
+});
+
+// ================= 暴露给 Flutter 的 API =================
+window.live2dAPI = {
+  // 切换动作
+  playMotion: function(motionName, immediate) {
+    if (!model) return;
+    setStatus(motionName);
+
+    switch (motionName) {
+      case 'idle':
+        model.internalModel.motionManager.stopAllMotions();
+        model.internalModel.autoBlink = true;
+        setStatus('待机');
+        break;
+      case 'listening':
+        model.internalModel.motionManager.startMotion('Idle', 0, 3); // 侧耳倾听
+        setStatus('聆听中');
+        break;
+      case 'thinking':
+        model.internalModel.motionManager.startMotion('TapBody', 0, 3); // 思考/触碰
+        setStatus('思考中');
+        break;
+      case 'speaking':
+        model.internalModel.motionManager.startMotion('Tap', 0, 3); // 说话/触碰
+        setStatus('说话中');
+        break;
+      default:
+        // 尝试启动指定动作
+        try {
+          model.internalModel.motionManager.startMotion('Idle', 0, 3);
+        } catch(_) {}
+        setStatus(motionName);
+    }
+  },
+
+  // 口型同步 - 由音频振幅驱动 (0.0 - 1.0)
+  setMouthOpenY: function(value) {
+    if (!model) return;
+    try {
+      const param = model.internalModel.coreModel.parameters.indexOf('ParamMouthOpenY');
+      if (param >= 0) {
+        // 将 0-1 映射到 Live2D 口型参数范围 (通常 0-1)
+        model.internalModel.coreModel.parameters.setValue(param, Math.min(1, Math.max(0, value)));
+      }
+    } catch(_) {}
+  },
+
+  // 设置眼睛视线方向
+  setEyeGaze: function(x, y) {
+    if (!model) return;
+    try {
+      const px = model.internalModel.coreModel.parameters.indexOf('ParamAngleX');
+      const py = model.internalModel.coreModel.parameters.indexOf('ParamAngleY');
+      if (px >= 0) model.internalModel.coreModel.parameters.setValue(px, x !== 0 ? x * 30 : 0);
+      if (py >= 0) model.internalModel.coreModel.parameters.setValue(py, y !== 0 ? y * 30 : 0);
+    } catch(_) {}
+  },
+
+  // 设置模型 URL（热切换）
+  loadModel: function(url) {
+    // 重新加载模型
+    if (app && model) {
+      app.stage.removeChild(model);
+      model.destroy();
+    }
+    PIXI.live2d.Live2DModel.from(url).then(newModel => {
+      model = newModel;
+      model.anchor.set(0.5, 0.5);
+      model.position.set(app.screen.width / 2, app.screen.height * 0.6);
+      const scale = Math.min(app.screen.width / model.width, app.screen.height / model.height) * 0.9;
+      model.scale.set(scale);
+      app.stage.addChild(model);
+      console.log('[Live2D] 模型切换成功');
+    }).catch(e => console.error('[Live2D] 模型切换失败:', e));
+  },
+};
+
+// 状态标签更新
+function setStatus(text) {
+  const el = document.getElementById('status-label');
+  if (el) el.textContent = text;
+}
+
+// ================= 启动 =================
+initLive2D();
+</script>
+</body>
+</html>
