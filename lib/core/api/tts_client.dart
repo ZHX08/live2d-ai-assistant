@@ -1,53 +1,55 @@
-import 'dart:io';
-import 'package:dio/dio.dart';
-import 'package:path_provider/path_provider.dart';
-import 'api_config.dart';
+import 'tts/tts_provider.dart';
+import 'tts/openai_provider.dart';
+import 'tts/minimax_provider.dart';
+import 'tts/mimo_provider.dart';
 
+/// TTS 客户端 — 多 Provider 门面
+/// 默认使用 OpenAI，可在 ApiConfig 中切换
 class TtsClient {
-  late final Dio _dio;
+  TtsProvider? _provider;
 
-  TtsClient() {
-    _dio = Dio(BaseOptions(
-      baseUrl: ApiConfig.ttsBaseUrl,
-      connectTimeout: const Duration(seconds: 10),
-      receiveTimeout: const Duration(seconds: 30),
-      headers: {'Authorization': 'Bearer ${ApiConfig.ttsApiKey}'},
-      responseType: ResponseType.bytes,
-    ));
+  /// 获取当前 Provider（懒加载）
+  TtsProvider get provider {
+    if (_provider == null) {
+      _provider = _createProvider(TtsProviderType.openai);
+    }
+    return _provider!;
   }
 
+  /// 切换 Provider
+  void use(TtsProviderType type) {
+    _provider = _createProvider(type);
+  }
+
+  /// 获取当前 Provider 名称
+  String get providerName => provider.name;
+
+  /// 合成文本为语音，返回音频文件路径
   Future<String> synthesize({
     required String text,
     String? voice,
     double speed = 1.0,
-  }) async {
-    final payload = {
-      'model': ApiConfig.ttsModel,
-      'input': text,
-      'voice': voice ?? ApiConfig.ttsVoice,
-      'speed': speed,
-      'response_format': 'mp3',
-    };
-    final response = await _dio.post('', data: payload);
-    if (response.statusCode != 200) throw Exception('TTS error: ${response.statusCode}');
-
-    final tempDir = await getTemporaryDirectory();
-    final filePath = '${tempDir.path}/tts_${DateTime.now().millisecondsSinceEpoch}.mp3';
-    await File(filePath).writeAsBytes(response.data as List<int>);
-    return filePath;
+  }) {
+    return provider.synthesize(text: text, voice: voice, speed: speed);
   }
 
+  /// 分段合成
   Future<List<String>> synthesizeSentences({
     required String text,
     String? voice,
     double speed = 1.0,
-  }) async {
-    final sentences = text.split(RegExp(r'(?<=[。！？.!?\n])')).where((s) => s.trim().isNotEmpty).toList();
-    final results = <String>[];
-    for (final s in sentences) {
-      results.add(await synthesize(text: s, voice: voice, speed: speed));
-      await Future.delayed(const Duration(milliseconds: 200));
+  }) {
+    return provider.synthesizeSentences(text: text, voice: voice, speed: speed);
+  }
+
+  TtsProvider _createProvider(TtsProviderType type) {
+    switch (type) {
+      case TtsProviderType.openai:
+        return OpenaiTtsProvider();
+      case TtsProviderType.minimax:
+        return MiniMaxTtsProvider();
+      case TtsProviderType.mimo:
+        return MiMoTtsProvider();
     }
-    return results;
   }
 }
